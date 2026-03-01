@@ -6,9 +6,6 @@
 /* ════════════════════════════════
    CONFETTI CANVAS
 ════════════════════════════════ */
-/* วางไว้บนสุดของไฟล์ main.js */
-const GOOGLE_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzdjfk9wgaMbOvKx_OrftRFXfs2FFiYTMif_s1r9NUpBZz-SXd77as19xoeR7WutPSHWg/exec';
-
 const cv  = document.getElementById('confetti-canvas');
 const cx  = cv.getContext('2d');
 
@@ -287,18 +284,15 @@ async function fetchCloudinaryPhotos() {
 }
 /* ดึงรูปจาก Cloudinary ทุกๆ 30 วินาที → อัพเดท float layer แบบ realtime */
 async function updatePhotosRealtime() {
-  try {
-    const res = await fetch(GOOGLE_SCRIPT_URL);
-    const data = await res.json(); 
-    
-    data.forEach(item => {
-      // เช็คว่ารูปนี้ลอยอยู่หรือยัง ถ้ายังให้แอดเพิ่ม
-      const exists = floatPhotos.some(p => p.img.src === item.url);
-      if (!exists) {
-        addPhotoToFloat(item.url, item.caption);
-      }
-    });
-  } catch (e) { console.log("Fetch error:", e); }
+  const newUrls = await fetchCloudinaryPhotos();
+  newUrls.forEach(url => {
+    // เช็คว่า URL นี้มีอยู่ใน floatPhotos หรือยัง (ป้องกันรูปซ้ำ)
+    const exists = floatPhotos.some(img => img.src === url);
+    if (!exists) {
+      console.log("New photo detected! Adding to float...");
+      addPhotoToFloat(url);
+    }
+  });
 }
 
 // ตั้งเวลาให้ทำงานทุกๆ n วิ
@@ -353,32 +347,23 @@ class FloatParticle {
     if (this.y < -this.h - 20) this.reset();
   }
   draw() {
-  pctx.save();
-  pctx.globalAlpha = this.op;
-  pctx.translate(this.x + this.w / 2, this.y + this.h / 2);
-  pctx.rotate(this.rot);
-
-  // วาดรูปโค้งมน
-  drawRoundedImage(pctx, this.img, -this.w/2, -this.h/2, this.w, this.h, 12);
-
-  // --- เพิ่มส่วนวาดข้อความตรงนี้ ---
-  if (this.caption) {
-    pctx.font = "bold 12px 'Kanit'";
-    const tw = pctx.measureText(this.caption).width;
-    
-    // วาดพื้นหลังข้อความ
-    pctx.fillStyle = "rgba(0, 0, 0, 0.4)";
-    pctx.beginPath();
-    pctx.roundRect(-tw/2 - 6, this.h/2 + 4, tw + 12, 18, 6); 
-    pctx.fill();
-
-    // วาดตัวอักษร
-    pctx.fillStyle = "#ffffff";
-    pctx.textAlign = "center";
-    pctx.fillText(this.caption, 0, this.h/2 + 17);
-     }
-     pctx.restore();
-   }
+    pctx.save();
+    pctx.globalAlpha = this.op;
+    pctx.translate(this.x + this.w / 2, this.y + this.h / 2);
+    pctx.rotate(this.rot);
+    // Motion blur ghost trail
+    for (let t = 3; t >= 1; t--) {
+      pctx.save();
+      pctx.globalAlpha = this.op * (t / 9);
+      pctx.translate(0, this.vy * t * 0.6);
+      drawRoundedImage(pctx, this.img, -this.w/2, -this.h/2, this.w, this.h, 8);
+      pctx.restore();
+    }
+    pctx.shadowColor = 'rgba(255,200,200,0.25)';
+    pctx.shadowBlur  = 14;
+    drawRoundedImage(pctx, this.img, -this.w/2, -this.h/2, this.w, this.h, 12);
+    pctx.restore();
+  }
 }
 
 function drawRoundedImage(ctx, img, x, y, w, h, r) {
@@ -396,14 +381,13 @@ function drawRoundedImage(ctx, img, x, y, w, h, r) {
 }
 
 /* Add a single photo dataURL to the float pool */
-function addPhotoToFloat(url, caption = "") {
-  const img = new Image();
+function addPhotoToFloat(dataURL) {
+  const img  = new Image();
   img.onload = () => {
-    // เก็บเป็น Object ที่มีทั้งรูปและข้อความ
-    floatPhotos.push({ img: img, caption: caption });
+    floatPhotos.push(img);
     rebuildParticles();
   };
-  img.src = url;
+  img.src = dataURL;
 }
 
 /* Sync particle count: 3 per unique photo, max 24 */
@@ -423,10 +407,12 @@ function rebuildParticles() {
 })();
 
 /* On page load: ดึงรูปทั้งหมดจาก Cloudinary "Client_Image" folder → float */
-updatePhotosRealtime().then(() => {
-  console.log("Database initialized from Google Sheets");
-}).catch(err => {
-  console.error("Initial fetch failed:", err);
+fetchCloudinaryPhotos().then(urls => {
+  console.log("Found photos:", urls); // ดูว่ามี URL ส่งมาไหม
+  if (urls.length === 0) {
+    console.warn("No photos found! Check Cloudinary Security Settings.");
+  }
+  urls.forEach(url => addPhotoToFloat(url));
 });
 
 /* ════════════════════════════════
@@ -439,37 +425,30 @@ const imgEl     = document.getElementById('previewImg');
 
 fileInput.addEventListener('change', e => {
   const f = e.target.files[0]; if (!f) return;
-  const captionText = document.getElementById('captionInput').value || ""; // ดึงข้อความจากช่องพิมพ์
-
   const reader = new FileReader();
   reader.onload = async ev => {
     const dataURL = ev.target.result;
 
-    // โชว์ Preview ทันที
+    // Show preview overlay immediately
     imgEl.src = dataURL;
     overlay.style.display = 'flex';
     requestAnimationFrame(() => overlay.classList.add('active'));
 
+    // ── อัพโหลดขึ้น Cloudinary "Client Image" folder ──
+    // แล้วใช้ URL จาก Cloudinary เพิ่มเข้า float layer
+    // (ทุกคนที่เปิด website จะเห็นรูปนี้ลอยด้วย)
     try {
-      // 1. ส่งรูปไป Cloudinary ก่อนเพื่อเอา URL
       const cloudURL = await uploadToCloudinary(dataURL);
-      
-      // 2. ส่ง URL รูป + ข้อความ ไปบันทึกลง Google Sheets
-      await fetch(GOOGLE_SCRIPT_URL, {
-        method: 'POST',
-        mode: 'no-cors', 
-        body: JSON.stringify({ url: cloudURL, caption: captionText })
-      });
-
-      // 3. สั่งให้รูปลอยขึ้นจอตัวเองทันที
-      addPhotoToFloat(cloudURL, captionText);
+      addPhotoToFloat(cloudURL);
     } catch (err) {
-      console.error("Upload error:", err);
+      console.warn('Cloudinary upload failed, floating local copy:', err);
+      addPhotoToFloat(dataURL); // fallback: float แบบ local ถ้า upload ไม่ผ่าน
     }
   };
   reader.readAsDataURL(f);
   fileInput.value = '';
 });
+
 /* ── Swipe image up to close ── */
 let sy = null, cy = 0, prevCy = 0, dragging = false;
 
